@@ -68,48 +68,23 @@ def get_charset(s):
 
 
 def check_malware_hash(hash_string):
-    """Check if a hash appears in malware databases."""
+    """Check if a hash appears in malware databases using MalwareBazaar."""
     import json
-    import socket
 
     h = hash_string.strip().lower()
+    url = "https://mb-api.abuse.ch/api/v1/"
+    data = urlencode({"query": "get_info", "hash": h}).encode()
 
-    # Try CIRCL HashLookup first
-    url = f"https://hashlookup.circl.lu/lookup/{h}"
-    req = Request(url, headers={"User-Agent": "hashtool/1.0", "Accept": "application/json"})
+    req = Request(url, data=data)
+    req.add_header("Auth-Key", "bc682eea7dee70303cafe29f9d6bdf583c2c71ddc7dbf0d4")
+    req.add_header("User-Agent", "Mozilla/5.0")
 
     try:
         with urlopen(req, timeout=10) as resp:
             result = json.loads(resp.read().decode("utf-8"))
-            if "message" not in result or "not found" not in result.get("message", "").lower():
-                if result.get("KnownMalicious") or result.get("tag") == "malicious":
-                    return {"malicious": True, "source": "CIRCL", "details": result}
-                return {"malicious": False, "source": "CIRCL", "details": result}
-    except URLError:
-        pass
-
-    # Try Team Cymru MHR (DNS-based, free)
-    try:
-        reversed_hash = ".".join(reversed(h))
-        query = f"{reversed_hash}.mhr.dns.bit.nl"
-        result = socket.gethostbyname_ex(query)
-        return {"malicious": True, "source": "Team Cymru MHR", "details": {"hash": h}}
-    except socket.gaierror:
-        pass
-
-    # Check against local known malware hashes (common ones)
-    known_malware = {
-        "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945": {
-            "name": "SocGhoulish",
-            "type": "Ransomware",
-            "source": "Local DB"
-        }
-    }
-
-    if h in known_malware:
-        return {"malicious": True, "source": "Local DB", "details": known_malware[h]}
-
-    return {"malicious": False, "message": "hash not found in malware databases"}
+            return result
+    except URLError as e:
+        return {"error": str(e), "query_status": "error"}
 
 
 def sha1_hash(text):
@@ -340,19 +315,22 @@ def main():
         if "error" in result:
             print(f"Error: {result['error']}")
             sys.exit(1)
-        if result.get("malicious"):
-            print("⚠️  MALWARE DETECTED ⚠️")
-            print(f"Hash: {args.hash}")
-            print(f"Source: {result.get('source', 'Unknown')}")
-            details = result.get("details", {})
-            if "name" in details:
-                print(f"Name: {details['name']}")
-            if "type" in details:
-                print(f"Type: {details['type']}")
-            if "KnownMalicious" in details:
-                print(f"Known Malicious: {details['KnownMalicious']}")
-        else:
+        if result.get("query_status") == "hash_not_found":
             print("Hash NOT found in malware database (appears clean)")
+        elif result.get("query_status") == "ok":
+            data = result.get("data", [{}])[0]
+            print("⚠️  MALWARE DETECTED ⚠️")
+            print(f"SHA256: {data.get('sha256_hash', 'N/A')}")
+            print(f"MD5: {data.get('md5_hash', 'N/A')}")
+            print(f"SHA1: {data.get('sha1_hash', 'N/A')}")
+            print(f"File name: {data.get('file_name', 'N/A')}")
+            print(f"File type: {data.get('file_type', 'N/A')}")
+            print(f"Malware family: {data.get('malware_family', 'N/A')}")
+            print(f"Signature: {data.get('signature', 'N/A')}")
+            print(f"First seen: {data.get('first_seen', 'N/A')}")
+            print(f"VirusTotal: https://www.virustotal.com/gui/file/{data.get('sha256_hash', '')}")
+        else:
+            print(f"Query status: {result.get('query_status', 'unknown')}")
 
     elif args.command == "generate":
         try:
