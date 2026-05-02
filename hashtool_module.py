@@ -8,6 +8,7 @@ import re
 import sys
 from urllib.request import Request, urlopen
 from urllib.error import URLError
+from urllib.parse import urlencode
 from pathlib import Path
 
 import bcrypt
@@ -25,7 +26,7 @@ def identify_hash(hash_string):
         (r"^\$2[ayb]\$\d+\$.+", "bcrypt", "bcrypt (starting with $2a$, $2b$, or $2y$)"),
         (r"^\$s0\$\d+\$\$.+", "scrypt", "scrypt (OpenSSL format)"),
         (r"^\$scrypt\$.+", "scrypt", "scrypt"),
-        (r"^\$argon2[id]?\$\$.+", "Argon2", "Argon2"),
+        (r"^\$argon2[a-z]*\$", "Argon2", "Argon2"),
         (r"^[a-fA-F0-9]{32}$", "MD5", "32 hex chars"),
         (r"^[a-fA-F0-9]{40}$", "SHA1", "40 hex chars"),
         (r"^[a-fA-F0-9]{64}$", "SHA256", "64 hex chars"),
@@ -64,6 +65,24 @@ def get_charset(s):
     if any(c in "+/=" for c in chars):
         parts.append("base64")
     return ", ".join(parts) if parts else "unknown"
+
+
+def check_malware_hash(hash_string):
+    """Check if a hash appears in malware databases using CIRCL HashLookup."""
+    import json
+
+    h = hash_string.strip().lower()
+    url = f"https://hashlookup.circl.lu/lookup/{h}"
+    req = Request(url, headers={"User-Agent": "hashtool/1.0", "Accept": "application/json"})
+
+    try:
+        with urlopen(req, timeout=10) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+            return result
+    except URLError as e:
+        if "404" in str(e) or "NOT FOUND" in str(e).upper():
+            return {"message": "hash not found"}
+        return {"error": str(e)}
 
 
 def sha1_hash(text):
@@ -219,6 +238,9 @@ def main():
     check_hash_parser = subparsers.add_parser("check-hash", help="Get info about a hash")
     check_hash_parser.add_argument("hash", help="Hash to analyze")
 
+    malware_parser = subparsers.add_parser("malware-check", help="Check hash against malware databases")
+    malware_parser.add_argument("hash", help="Hash to check (MD5, SHA1, or SHA256)")
+
     gen_parser = subparsers.add_parser("generate", help="Generate hash from text")
     gen_parser.add_argument("text", help="Text to hash")
     gen_parser.add_argument(
@@ -285,6 +307,27 @@ def main():
         print("Identified as:")
         for name, desc in results:
             print(f"  - {name}: {desc}")
+
+    elif args.command == "malware-check":
+        result = check_malware_hash(args.hash)
+        if "error" in result:
+            print(f"Error: {result['error']}")
+            sys.exit(1)
+        if "message" in result and "not found" in result.get("message", "").lower():
+            print("Hash NOT found in malware database")
+        elif "KnownMalicious" in result or result.get("tag") == "malicious":
+            print("⚠️  MALWARE DETECTED ⚠️")
+            print(f"Hash: {args.hash}")
+            if "SHA1" in result:
+                print(f"SHA1: {result.get('SHA1')}")
+            if "MD5" in result:
+                print(f"MD5: {result.get('MD5')}")
+            if "filename" in result:
+                print(f"Filename: {result.get('filename')}")
+            if "KnownMalicious" in result:
+                print(f"Malicious: {result.get('KnownMalicious')}")
+        else:
+            print("Hash NOT found in malware database (appears clean)")
 
     elif args.command == "generate":
         try:
