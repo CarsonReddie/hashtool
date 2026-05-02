@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "hashtool"
+version = "1.0.0"
+description = "Hash Identifier/Checker - Identify hash types and check against breach databases"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "Carson", email = "carson@example.com"},
+]
+dependencies = [
+    "bcrypt>=4.0",
+    "argon2-cffi>=21.0",
+]
+
+[project.scripts]
+hashtool = "hashtool:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["hashtool*"]
+
+[tool.pytest.ini_options]
+testpaths = ["."]
+python_files = ["test_*.py"]
