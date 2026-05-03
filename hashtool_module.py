@@ -120,6 +120,101 @@ def get_remediation(malware_family, file_type):
     return steps
 
 
+def generate_hmac(message, key, algo="sha256"):
+    """Generate HMAC for a message using specified algorithm."""
+    algo = algo.lower()
+    hash_algos = {
+        "md5": hashlib.md5,
+        "sha1": hashlib.sha1,
+        "sha224": hashlib.sha224,
+        "sha256": hashlib.sha256,
+        "sha384": hashlib.sha384,
+        "sha512": hashlib.sha512,
+    }
+    if algo not in hash_algos:
+        raise ValueError(f"Unsupported algorithm: {algo}")
+    return hmac.new(key.encode("utf-8"), message.encode("utf-8"), hash_algos[algo]).hexdigest()
+
+
+def verify_hmac(message, key, signature, algo="sha256"):
+    """Verify HMAC signature using constant-time comparison."""
+    expected = generate_hmac(message, key, algo)
+    return timing_safe_compare(expected, signature)
+
+
+def init_integrity_baseline(directory, algo="sha256"):
+    """Create a baseline of file hashes for integrity monitoring."""
+    import json
+    from datetime import datetime
+
+    dir_path = Path(directory)
+    if not dir_path.exists():
+        raise FileNotFoundError(f"Directory not found: {directory}")
+
+    baseline = {
+        "directory": str(dir_path.absolute()),
+        "created": datetime.now().isoformat(),
+        "algorithm": algo,
+        "files": {}
+    }
+
+    for f in dir_path.rglob("*"):
+        if f.is_file():
+            try:
+                file_hash = hash_file(str(f), algo)
+                rel_path = str(f.relative_to(dir_path))
+                baseline["files"][rel_path] = file_hash
+            except (IOError, OSError):
+                continue
+
+    baseline_file = dir_path / ".integrity_baseline.json"
+    with open(baseline_file, "w") as f:
+        json.dump(baseline, f, indent=2)
+
+    return len(baseline["files"]), str(baseline_file)
+
+
+def check_integrity(directory, algo="sha256"):
+    """Check directory against stored baseline."""
+    import json
+    from datetime import datetime
+
+    dir_path = Path(directory)
+    baseline_file = dir_path / ".integrity_baseline.json"
+
+    if not baseline_file.exists():
+        raise FileNotFoundError("No baseline found. Run 'monitor-init' first.")
+
+    with open(baseline_file) as f:
+        baseline = json.load(f)
+
+    changes = {"modified": [], "added": [], "deleted": [], "unchanged": []}
+    baseline_files = baseline.get("files", {})
+
+    # Check existing files
+    for f in dir_path.rglob("*"):
+        if f.is_file() and f.name != ".integrity_baseline.json":
+            try:
+                rel_path = str(f.relative_to(dir_path))
+                current_hash = hash_file(str(f), algo)
+                if rel_path in baseline_files:
+                    if current_hash != baseline_files[rel_path]:
+                        changes["modified"].append(rel_path)
+                    else:
+                        changes["unchanged"].append(rel_path)
+                else:
+                    changes["added"].append(rel_path)
+            except (IOError, OSError):
+                continue
+
+    # Check for deleted files
+    for rel_path in baseline_files:
+        if not (dir_path / rel_path).exists():
+            changes["deleted"].append(rel_path)
+
+    return changes, baseline.get("created", "unknown")
+
+
 def check_malware_hash(hash_string):
     """Check if a hash appears in malware databases using MalwareBazaar."""
     import json
@@ -296,6 +391,45 @@ def main():
     malware_parser = subparsers.add_parser("malware-check", help="Check hash against malware databases")
     malware_parser.add_argument("hash", help="Hash to check (MD5, SHA1, or SHA256)")
 
+    hmac_gen_parser = subparsers.add_parser("hmac-generate", help="Generate HMAC for a message")
+    hmac_gen_parser.add_argument("message", help="Message to authenticate")
+    hmac_gen_parser.add_argument("key", help="Secret key")
+    hmac_gen_parser.add_argument(
+        "--algo",
+        default="sha256",
+        choices=["md5", "sha1", "sha224", "sha256", "sha384", "sha512"],
+        help="Hash algorithm (default: sha256)",
+    )
+
+    hmac_verify_parser = subparsers.add_parser("hmac-verify", help="Verify HMAC signature")
+    hmac_verify_parser.add_argument("message", help="Original message")
+    hmac_verify_parser.add_argument("key", help="Secret key")
+    hmac_verify_parser.add_argument("signature", help="HMAC signature to verify")
+    hmac_verify_parser.add_argument(
+        "--algo",
+        default="sha256",
+        choices=["md5", "sha1", "sha224", "sha256", "sha384", "sha512"],
+        help="Hash algorithm (default: sha256)",
+    )
+
+    monitor_init_parser = subparsers.add_parser("monitor-init", help="Initialize file integrity baseline")
+    monitor_init_parser.add_argument("directory", help="Directory to monitor")
+    monitor_init_parser.add_argument(
+        "--algo",
+        default="sha256",
+        choices=["md5", "sha1", "sha224", "sha256", "sha384", "sha512"],
+        help="Hash algorithm (default: sha256)",
+    )
+
+    monitor_check_parser = subparsers.add_parser("monitor-check", help="Check directory integrity against baseline")
+    monitor_check_parser.add_argument("directory", help="Directory to check")
+    monitor_check_parser.add_argument(
+        "--algo",
+        default="sha256",
+        choices=["md5", "sha1", "sha224", "sha256", "sha384", "sha512"],
+        help="Hash algorithm (default: sha256)",
+    )
+
     gen_parser = subparsers.add_parser("generate", help="Generate hash from text")
     gen_parser.add_argument("text", help="Text to hash")
     gen_parser.add_argument(
@@ -391,6 +525,53 @@ def main():
                 print(step)
         else:
             print(f"Query status: {result.get('query_status', 'unknown')}")
+
+    elif args.command == "hmac-generate":
+        try:
+            signature = generate_hmac(args.message, args.key, args.algo)
+            print(f"HMAC ({args.algo.upper()}): {signature}")
+        except ValueError as e:
+            print(f"Error: {e}")
+            sys.exit(1)
+
+    elif args.command == "hmac-verify":
+        try:
+            if verify_hmac(args.message, args.key, args.signature, args.algo):
+                print("HMAC VERIFIED")
+            else:
+                print("HMAC INVALID")
+        except ValueError as e:
+            print(f"Error: {e}")
+            sys.exit(1)
+
+    elif args.command == "monitor-init":
+        try:
+            count, baseline_path = init_integrity_baseline(args.directory, args.algo)
+            print(f"Baseline created: {baseline_path}")
+            print(f"Files hashed: {count}")
+        except (FileNotFoundError, ValueError) as e:
+            print(f"Error: {e}")
+            sys.exit(1)
+
+    elif args.command == "monitor-check":
+        try:
+            changes, baseline_date = check_integrity(args.directory, args.algo)
+            print(f"Integrity check (baseline: {baseline_date})")
+            print(f"Modified files: {len(changes['modified'])}")
+            for f in changes['modified']:
+                print(f"  - {f}")
+            print(f"Added files: {len(changes['added'])}")
+            for f in changes['added']:
+                print(f"  + {f}")
+            print(f"Deleted files: {len(changes['deleted'])}")
+            for f in changes['deleted']:
+                print(f"  - {f}")
+            print(f"Unchanged: {len(changes['unchanged'])}")
+            if not any(changes.values()):
+                print("No changes detected")
+        except FileNotFoundError as e:
+            print(f"Error: {e}")
+            sys.exit(1)
 
     elif args.command == "generate":
         try:
