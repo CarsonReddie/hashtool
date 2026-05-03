@@ -67,6 +67,59 @@ def get_charset(s):
     return ", ".join(parts) if parts else "unknown"
 
 
+def get_remediation(malware_family, file_type):
+    """Return remediation steps based on malware family and file type."""
+    remediation = {
+        "general": [
+            "1. ISOLATE the infected system from the network immediately",
+            "2. Take a snapshot/image of the system for forensic analysis",
+            "3. Run a full system scan with updated antivirus/EDR tools",
+            "4. Check running processes and terminate suspicious ones",
+            "5. Review system logs for Indicators of Compromise (IoCs)",
+            "6. Change all passwords from a clean system",
+            "7. Restore affected files from clean backups",
+            "8. Report incident to your security team/CERT",
+        ]
+    }
+
+    specific = {
+        "ransomware": [
+            " - DO NOT pay the ransom",
+            " - Check for decryptors at https://www.nomoreransom.org/",
+            " - Isolate immediately to prevent spread to network shares",
+            " - Check backup integrity before restoring",
+            " - Report to law enforcement (IC3, etc.)",
+        ],
+        "trojan": [
+            " - Scan all connected systems for lateral movement",
+            " - Check for persistence mechanisms (registry, scheduled tasks, services)",
+            " - Monitor network traffic for C2 communication",
+            " - Update firewall rules to block known C2 IPs/domains",
+        ],
+        "worm": [
+            " - Patch vulnerable services immediately",
+            " - Segment network to prevent lateral spread",
+            " - Update all systems with latest security patches",
+        ],
+        "spyware": [
+            " - Check for keyloggers and screen capture tools",
+            " - Review network traffic for data exfiltration",
+            " - Change banking/credit card credentials immediately",
+        ],
+    }
+
+    family_lower = (malware_family or "").lower()
+    type_lower = (file_type or "").lower()
+
+    steps = list(remediation["general"])
+
+    for key, actions in specific.items():
+        if key in family_lower or key in type_lower:
+            steps.extend(actions)
+
+    return steps
+
+
 def check_malware_hash(hash_string):
     """Check if a hash appears in malware databases using MalwareBazaar."""
     import json
@@ -329,6 +382,13 @@ def main():
             print(f"Signature: {data.get('signature', 'N/A')}")
             print(f"First seen: {data.get('first_seen', 'N/A')}")
             print(f"VirusTotal: https://www.virustotal.com/gui/file/{data.get('sha256_hash', '')}")
+
+            print("\nREMEDIATION STEPS:")
+            family = data.get('malware_family', '')
+            file_type = data.get('file_type', '')
+            steps = get_remediation(family, file_type)
+            for step in steps:
+                print(step)
         else:
             print(f"Query status: {result.get('query_status', 'unknown')}")
 
