@@ -4,6 +4,7 @@
 import argparse
 import hashlib
 import hmac
+import json
 import re
 import sys
 from urllib.request import Request, urlopen
@@ -15,6 +16,11 @@ import bcrypt
 import argon2
 
 argon2_hasher = argon2.PasswordHasher()
+
+try:
+    from zxcvbn import zxcvbn
+except ImportError:
+    zxcvbn = None
 
 
 def identify_hash(hash_string):
@@ -213,6 +219,61 @@ def check_integrity(directory, algo="sha256"):
             changes["deleted"].append(rel_path)
 
     return changes, baseline.get("created", "unknown")
+
+
+def estimate_password_strength(password):
+    """Estimate password strength using zxcvbn."""
+    if zxcvbn is None:
+        return {"error": "zxcvbn not installed. Run: pip install zxcvbn-python"}
+
+    result = zxcvbn(password)
+    return {
+        "password": password,
+        "score": result["score"],  # 0-4 (0=weak, 4=strong)
+        "guesses": result["guesses"],
+        "guesses_log10": result["guesses_log10"],
+        "crack_time": result["crack_times_display"],
+        "feedback": result["feedback"],
+        "calc_time": result["calc_time"],
+    }
+
+
+def batch_hash_check(hash_file, wordlist=None, check_type="malware", algo="md5"):
+    """Process multiple hashes from a file."""
+    path = Path(hash_file)
+    if not path.exists():
+        raise FileNotFoundError(f"File not found: {hash_file}")
+
+    results = []
+    with open(path) as f:
+        hashes = [line.strip() for line in f if line.strip()]
+
+    for h in hashes:
+        result = {
+            "hash": h,
+            "sha256": h,
+        }
+
+        if check_type == "malware":
+            malware_result = check_malware_hash(h)
+            result["malware"] = malware_result
+            result["status"] = "malicious" if malware_result.get("query_status") == "ok" else "clean"
+
+        elif check_type == "breach":
+            # Only check passwords, not hashes
+            result["breach"] = "N/A (use 'check' command for passwords)"
+
+        elif check_type == "identify":
+            result["identification"] = identify_hash(h)
+
+        elif check_type == "crack" and wordlist:
+            found, tried = crack_hash(h, wordlist, algo)
+            result["cracked"] = found
+            result["attempts"] = tried
+
+        results.append(result)
+
+    return results
 
 
 def check_malware_hash(hash_string):
@@ -430,6 +491,32 @@ def main():
         help="Hash algorithm (default: sha256)",
     )
 
+    strength_parser = subparsers.add_parser("password-strength", help="Estimate password strength")
+    strength_parser.add_argument("password", help="Password to evaluate")
+
+    batch_parser = subparsers.add_parser("batch", help="Process multiple hashes from a file")
+    batch_parser.add_argument("hash_file", help="File containing hashes (one per line)")
+    batch_parser.add_argument(
+        "--type",
+        default="malware",
+        choices=["malware", "identify", "crack"],
+        help="Type of check (default: malware)",
+    )
+    batch_parser.add_argument(
+        "--wordlist",
+        help="Wordlist for crack type",
+    )
+    batch_parser.add_argument(
+        "--algo",
+        default="md5",
+        choices=["md5", "sha1", "sha224", "sha256", "sha384", "sha512"],
+        help="Hash algorithm for crack type (default: md5)",
+    )
+    batch_parser.add_argument(
+        "--output",
+        help="Output file for results (JSON format)",
+    )
+
     gen_parser = subparsers.add_parser("generate", help="Generate hash from text")
     gen_parser.add_argument("text", help="Text to hash")
     gen_parser.add_argument(
@@ -570,6 +657,48 @@ def main():
             if not any(changes.values()):
                 print("No changes detected")
         except FileNotFoundError as e:
+            print(f"Error: {e}")
+            sys.exit(1)
+
+    elif args.command == "password-strength":
+        result = estimate_password_strength(args.password)
+        if "error" in result:
+            print(f"Error: {result['error']}")
+            sys.exit(1)
+        print(f"Password: {result['password'][:3]}***")
+        print(f"Score: {result['score']}/4 ", end="")
+        score_labels = ["Very Weak", "Weak", "Fair", "Strong", "Very Strong"]
+        print(f"({score_labels[result['score']]})")
+        print(f"Estimated guesses: {result['guesses']:,}")
+        print(f"Crack time (offline): {result['crack_time']['offline_slow_hashing_1e4_per_second']}")
+        print(f"Crack time (online): {result['crack_time']['online_no_throttling_10_per_second']}")
+        if result['feedback'].get('warning'):
+            print(f"Warning: {result['feedback']['warning']}")
+        if result['feedback'].get('suggestions'):
+            print("Suggestions:")
+            for s in result['feedback']['suggestions']:
+                print(f"  - {s}")
+
+    elif args.command == "batch":
+        try:
+            results = batch_hash_check(
+                args.hash_file,
+                wordlist=args.wordlist,
+                check_type=args.type,
+                algo=args.algo
+            )
+            if args.output:
+                with open(args.output, "w") as f:
+                    json.dump(results, f, indent=2)
+                print(f"Results written to {args.output}")
+            else:
+                for r in results:
+                    print(f"\nHash: {r['hash'][:20]}...")
+                    print(f"  Status: {r.get('status', 'N/A')}")
+                    if 'identification' in r:
+                        for name, desc in r['identification']:
+                            print(f"  - {name}: {desc}")
+        except (FileNotFoundError, ValueError) as e:
             print(f"Error: {e}")
             sys.exit(1)
 
